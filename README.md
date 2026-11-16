@@ -29,6 +29,24 @@ It needs Windows 10 or 11, 64-bit. Keep the whole folder together: the exe needs
 4. Optionally edit (see below).
 5. Click **Merge Videos** (or **Export Video** once something is edited) and choose where to save the result. The bar shows progress, speed and time left, and you can **Cancel** at any time.
 
+## Works with footage from (almost) any camera
+
+| Source | What it records | Notes |
+|---|---|---|
+| **iPhone** | HEVC 10-bit HDR (HLG / Dolby Vision), spatial audio, Auto FPS | Rotation, spatial audio (MOV) and mixed frame rates are kept |
+| **Android** (Samsung, Pixel, Xiaomi …) | H.264 / HEVC, HDR10 (PQ), portrait or upside-down | PQ HDR stays HDR; photos and text placed in HDR video get the correct brightness (SDR white at 203 nits) |
+| **GoPro HERO** | HEVC / H.264 MP4 with telemetry and timecode tracks, split into chapters (GX01…, GX02…) | Chapters are put in order and merged losslessly; `.LRV` / `.THM` side files are ignored |
+| **Insta360 X / ONE** (360°) | Raw two-lens `.insv` (one file, or a `_00_` + `_10_` pair) | A dialog asks where to look (left/right, up/down, tilt, zoom), or makes a *tiny planet*, and converts it into a normal video. This is a quick stitch; Insta360 Studio exports stitch seams more precisely, and those MP4s work here too |
+| **Insta360 Ace / GO**, DJI, action cams | H.264 / HEVC MP4 | Same as phones |
+| **GoPro MAX** `.360` | Proprietary 360° format | Export it with the free GoPro Player first; the app explains this when you add one |
+| **Camcorders** (Sony, Panasonic, Canon AVCHD) | 1080i H.264 + AC-3 in `.MTS` / `.M2TS` | Merged losslessly; smart-cut trimming stays interlaced; deinterlaced (bwdif) only when re-encoded to a progressive format |
+| **Sony / Canon mirrorless** (XAVC S) | H.264 4:2:2 10-bit + PCM audio | Kept at 4:2:2 10-bit; saved as MOV because MP4 can't hold PCM |
+| Webcams, screen recorders (OBS), WhatsApp, Telegram | MJPEG/AVI, VP9/AV1 + Opus WebM/MKV, small H.264 MP4 | Read and converted as needed |
+| Old phones, DVDs, Windows | H.263 + AMR `.3gp`, MPEG-2 `.VOB` / `.MPG`, `.WMV` | Read and converted |
+| Editing exports | ProRes, DNxHD `.mov` | Read and converted |
+
+When clips from different devices are merged, they are made compatible losslessly wherever possible. FFmpeg's join can't mix different *time bases* (devices store timestamps differently, and mixing them corrupts the timing), so mismatched clips are first rewrapped without re-encoding.
+
 ## Adding clips one by one
 
 You don't need a folder. On the start screen click **＋ Add videos one by one…** or **Empty timeline**, then use any of these. Each addition is one undo step.

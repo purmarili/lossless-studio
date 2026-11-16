@@ -84,7 +84,7 @@ if (-not (Test-Path "whisper\whisper-cli.exe")) {
 # 3. Tests ------------------------------------------------------------------------
 if (-not $SkipTests) {
     Step "Running engine and editor tests"
-    & $venvPy -m unittest tests.test_engine tests.test_render
+    & $venvPy -m unittest tests.test_engine tests.test_render tests.test_formats
     if ($LASTEXITCODE -ne 0) { throw "Tests failed - not building." }
 }
 

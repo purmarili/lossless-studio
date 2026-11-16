@@ -209,6 +209,46 @@ COPY_WEIGHT = 0.15      # relative cost of a stream-copy pass per second of foot
 ENCODE_WEIGHT = 10.0    # relative cost of re-encoding a second of (4K) footage
 
 
+COMMON_TIMESCALE = "90000"     # time base of every H.264 part in MOV (concat needs one)
+
+
+def stream_timebase(path: Path, selector: str) -> str:
+    """Time base of a stream, e.g. "1/600" (iPhone) or "1/90000" (TS); "" if none."""
+    proc = ff.run([ff.ffprobe_path(), "-v", "error", "-select_streams", selector,
+                   "-show_entries", "stream=time_base", "-of", "csv=p=0", str(path)], timeout=60)
+    lines = ff.decode(proc.stdout).strip().splitlines()
+    return lines[0].strip().strip(",") if lines else ""
+
+
+def rewrap_video_args(src: Path, dst: Path) -> list[str]:
+    """Lossless rewrap of the video to a common time base (H.264 -> MOV at
+    90 kHz, other codecs -> Matroska, which always uses 1 ms)."""
+    if dst.suffix == ".mov":
+        return ["-i", str(src), "-map", "0:V:0", "-c", "copy", "-video_track_timescale", COMMON_TIMESCALE,
+                "-map_metadata", "-1", "-f", "mov", "-n", str(dst)]
+    return ["-i", str(src), "-map", "0:V:0", "-c", "copy", "-map_metadata", "-1", "-f", "matroska",
+            "-n", str(dst)]
+
+
+_MOV_AUDIO_OK = {"aac", "mp3", "ac3", "eac3", "alac", "apple_apac", "amr_nb", "amr_wb", "pcm_s16le", "pcm_s16be",
+                 "pcm_s24le", "pcm_s24be", "pcm_s32le", "pcm_f32le", "pcm_mulaw", "pcm_alaw", "mp2"}
+
+
+def audio_container(clip: Clip) -> str:
+    """MOV keeps Apple spatial audio and uses the sample rate as time base;
+    Matroska takes everything else (Opus, Vorbis, WMA …)."""
+    return ".mov" if all(a.codec in _MOV_AUDIO_OK for a in clip.audio) else ".mka"
+
+
+def rewrap_audio_args(src: Path, dst: Path, start: float | None = None, length: float | None = None) -> list[str]:
+    a = (["-ss", f"{start:.6f}"] if start else []) + ["-i", str(src)]
+    if length is not None:
+        a += ["-t", f"{length:.6f}"]
+    # copypriorss 0: don't keep the pre-roll packets before the seek point
+    return a + ["-map", "0:a", "-c", "copy", "-copypriorss", "0", "-map_metadata", "-1",
+                "-f", "mov" if dst.suffix == ".mov" else "matroska", "-n", str(dst)]
+
+
 def _embed_args(src: Path, dst: Path) -> list[str]:
     # Video only, in Matroska: it keeps in-band parameter sets (MP4/MOV would
     # strip them). Audio is taken straight from the originals, because e.g.
@@ -236,6 +276,9 @@ def _convert_args(clip: Clip, ref: Clip, fps: float | None, method: str, part: P
     v, rv = clip.v, ref.v
     same_geometry = (v.width, v.height, v.rotation) == (rv.width, rv.height, rv.rotation)
     filters = []
+    interlaced = ("tt", "bb", "tb", "bt")
+    if v.field_order in interlaced and rv.field_order not in interlaced:
+        filters.append("bwdif=mode=send_frame:parity=auto:deint=all")
     change_rate = bool(fps) and not same_fps(v.nominal_fps, fps)
     if change_rate:
         fr = fps_fraction(fps)
@@ -280,11 +323,12 @@ def _convert_args(clip: Clip, ref: Clip, fps: float | None, method: str, part: P
             xp.append(f"colormatrix={space}")
         if rng:
             xp.append("range=" + ("full" if rng in ("pc", "jpeg") else "limited"))
-        args += ["-c:v", "libx265", "-preset", "fast", "-crf", "16",
-                 "-profile:v", "main10" if ten_bit else "main", "-x265-params", ":".join(xp)]
+        # no forced profile: the encoder picks it from the pixel format
+        # (4:2:0 / 4:2:2 / 4:4:4, 8 / 10-bit), e.g. Sony XAVC 4:2:2 10-bit
+        args += ["-c:v", "libx265", "-preset", "fast", "-crf", "16", "-x265-params", ":".join(xp)]
     else:
-        args += ["-c:v", "libx264", "-preset", "medium", "-crf", "16",
-                 "-profile:v", "high10" if ten_bit else "high"]
+        args += ["-c:v", "libx264", "-preset", "medium", "-crf", "16"]
+    _ = ten_bit
     for opt, val in (("-color_primaries", prim), ("-color_trc", trc),
                      ("-colorspace", space), ("-color_range", rng)):
         if val:
@@ -292,6 +336,8 @@ def _convert_args(clip: Clip, ref: Clip, fps: float | None, method: str, part: P
     # HEVC parts go in Matroska (keeps the in-band headers); H.264 parts in MOV,
     # which keeps exact decode timestamps (FFmpeg handles H.264 headers itself).
     fmt = "matroska" if part.suffix == ".mkv" else "mov"
+    if fmt == "mov":
+        args += ["-video_track_timescale", COMMON_TIMESCALE]
     args += ["-map_metadata", "-1", "-f", fmt, "-n", str(part)]
     return args
 
@@ -315,13 +361,22 @@ def merge_smart(clips: list[Clip], output: Path, convert_ids: set[str], fps: flo
     if convert_ids and ref.v.codec not in CONFORM_CODECS:
         raise MergeError(f"Only H.264 and HEVC clips can be converted, not {ref.v.codec}.")
     hevc = ref.v.codec == "hevc"
-    embed = hevc and (bool(convert_ids) or needs_header_embedding(clips))
-    actions = ["encode" if c.id in convert_ids else ("embed" if embed else "copy") for c in clips]
-    separate = any(a != "copy" for a in actions)
+    # FFmpeg's concat demuxer does not convert between time bases: clips whose
+    # video (or audio) uses a different time base (other camera / app) are
+    # rewrapped losslessly to a common one first, or the result's timing breaks.
+    tb_mismatch = len({stream_timebase(c.path, "V:0") for c in clips}) > 1
+    audio_rewrap = len({stream_timebase(c.path, "a:0") for c in clips if c.audio}) > 1
+    embed = hevc and (bool(convert_ids) or needs_header_embedding(clips) or tb_mismatch)
+    rewrap = not hevc and (bool(convert_ids) or tb_mismatch)
+    actions = ["encode" if c.id in convert_ids else ("embed" if embed else ("rewrap" if rewrap else "copy"))
+               for c in clips]
+    separate = any(a != "copy" for a in actions) or audio_rewrap
     total = sum(c.duration for c in clips)
 
     weights = [c.duration * (ENCODE_WEIGHT if a == "encode" else COPY_WEIGHT)
-               for c, a in zip(clips, actions) if a != "copy"] + [total * COPY_WEIGHT]
+               for c, a in zip(clips, actions) if a != "copy"]
+    weights += [c.duration * COPY_WEIGHT * 0.2 for c in clips if c.audio and audio_rewrap]
+    weights += [total * COPY_WEIGHT]
     stages = _Stages(on_progress, weights)
     parts_dir = _parts_dir(output) if separate else None
     tmp_out = None
@@ -341,8 +396,21 @@ def merge_smart(clips: list[Clip], output: Path, convert_ids: set[str], fps: flo
                 stages.run(_embed_args(c.path, dst), c.duration,
                            f"Preparing clip {i} of {len(clips)} (lossless)", cancel)
                 video_sources.append(dst)
+            elif a == "rewrap":
+                dst = parts_dir / f"clip{i:05d}{'.mov' if ref.v.codec == 'h264' else '.mkv'}"
+                stages.run(rewrap_video_args(c.path, dst), c.duration,
+                           f"Preparing clip {i} of {len(clips)} (lossless)", cancel)
+                video_sources.append(dst)
             else:
                 video_sources.append(c.path)
+        audio_sources = [c.path for c in clips]
+        if audio_rewrap:
+            for i, c in enumerate(clips, 1):
+                if c.audio:
+                    dst = parts_dir / f"audio{i:05d}{audio_container(c)}"
+                    stages.run(rewrap_audio_args(c.path, dst), c.duration,
+                               f"Preparing sound {i} of {len(clips)} (lossless)", cancel)
+                    audio_sources[i - 1] = dst
 
         tmp_out = _temp_output(output)
         with tempfile.TemporaryDirectory(prefix="lvm-") as td:
@@ -356,7 +424,7 @@ def merge_smart(clips: list[Clip], output: Path, convert_ids: set[str], fps: flo
             else:
                 durs = [c.duration for c in clips]
                 vlist = _concat_list(video_sources, Path(td), "video.txt", durs)
-                alist = _concat_list([c.path for c in clips], Path(td), "audio.txt", durs)
+                alist = _concat_list(audio_sources, Path(td), "audio.txt", durs)
                 args = [*rot, "-f", "concat", "-safe", "0", "-i", str(vlist),
                         "-f", "concat", "-safe", "0", "-i", str(alist),
                         "-map", "0:V", "-map", "1:a?", *common]
@@ -421,7 +489,8 @@ def _encode_args(clip: Clip, t: EncodeTarget, part: Path) -> list[str]:
                  "-i", f"anullsrc=r={t.sample_rate}:cl={layout}"]
     fps = f"{t.fps.numerator}/{t.fps.denominator}"
     pix = "yuv420p10le" if t.ten_bit else "yuv420p"
-    vf = (f"scale={t.width}:{t.height}:force_original_aspect_ratio=decrease:flags=lanczos,"
+    deint = "bwdif=mode=send_frame:parity=auto:deint=all," if clip.v.field_order in ("tt", "bb", "tb", "bt") else ""
+    vf = (f"{deint}scale={t.width}:{t.height}:force_original_aspect_ratio=decrease:flags=lanczos,"
           f"pad={t.width}:{t.height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,"
           f"fps={fps},format={pix}")
     args += ["-map", "0:V:0"]

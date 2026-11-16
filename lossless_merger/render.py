@@ -31,10 +31,11 @@ from pathlib import Path
 
 from . import compat
 from . import ffmpeg_tools as ff
-from .media import Clip
-from .merger import (COPY_WEIGHT, ENCODE_WEIGHT, MUXERS, Cancelled, MergeError, MergeResult,  # noqa: F401
-                     ProgressFn, _concat_list, _embed_args, _finish, _inverse_rotation, _known,
-                     _parts_dir, _remove_quietly, _Stages, _temp_output, needs_header_embedding)
+from .media import Clip, probe
+from .merger import (COMMON_TIMESCALE, COPY_WEIGHT, ENCODE_WEIGHT, MUXERS, Cancelled, MergeError,  # noqa: F401
+                     MergeResult, ProgressFn, _concat_list, _embed_args, _finish, _inverse_rotation, _known,
+                     _parts_dir, _remove_quietly, _Stages, _temp_output, audio_container,
+                     needs_header_embedding, rewrap_audio_args, rewrap_video_args, stream_timebase)
 from .project import CANVASES, PRESETS, Project, Segment
 
 HDR_TRANSFERS = {"arib-std-b67", "smpte2084"}
@@ -72,6 +73,7 @@ class Target:
     ext: str
     cover: bool = False          # custom canvas: crop clips to fill it
     background: str = "black"    # what fills bars: black | blur
+    interlaced: str = ""         # field order kept for copied interlaced footage ("tt"/"bb"), else ""
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -172,7 +174,10 @@ def make_target(project: Project) -> Target:
                    or any(project.transition_after(i) > 0 for i in range(len(segs)))
                    or project.fade_in or project.fade_out)
     audio_keys = {compat.audio_key(c) for c in unique}
-    audio_copy = preset.key == "original" and not sound_edits and len(audio_keys) == 1
+    # MPEG program streams (DVD .VOB / .MPG) don't cut cleanly at audio frame
+    # boundaries when stream-copied: their sound is re-encoded instead
+    ps_source = any(c.format_name in ("mpeg", "vob", "mpegvideo") for c in unique)
+    audio_copy = (preset.key == "original" and not sound_edits and len(audio_keys) == 1 and not ps_source)
     with_audio = [c for c in unique if c.audio]
     rate, channels = 48000, 2
     if with_audio and preset.key == "original":
@@ -187,14 +192,11 @@ def make_target(project: Project) -> Target:
     if any(s.edit.stabilize for s in segs) and ten_bit_src:
         notes.append("Stabilized clips are processed in 8-bit (FFmpeg's stabilizer can't do 10-bit).")
 
-    if preset.key == "original":
-        first_ext = unique[0].path.suffix.lower()
-        ext = compat.suggested_extension(unique) if audio_copy else (
-            first_ext if first_ext in (".mp4", ".mov", ".mkv") else ".mp4")
-        if audio_copy and ext not in (".mp4", ".mov", ".mkv", ".m4v"):
-            ext = compat.compatible_container(unique[0])
-    else:
-        ext = ".mp4"
+    audio_codecs = {a.codec for c in unique for a in c.audio} if audio_copy else {"aac"}
+    ext = pick_container(codec, audio_codecs, unique[0].path.suffix.lower() if preset.key == "original" else ".mp4")
+    interlaced = ""
+    if allow_copy and codec == "h264" and rv.field_order in ("tt", "bb", "tb", "bt"):
+        interlaced = rv.field_order
 
     return Target(
         codec=codec, width=w, height=h, pix_fmt=pix,
@@ -205,7 +207,23 @@ def make_target(project: Project) -> Target:
         convert_ids=set(fit.convert) if allow_copy else {c.id for c in unique},
         audio_copy=audio_copy, audio_rate=rate if not preset.sdr else 48000,
         audio_channels=channels, audio_bitrate=preset.audio_bitrate, ext=ext,
-        cover=project.canvas != "original", background=project.background, notes=notes)
+        cover=project.canvas != "original", background=project.background, interlaced=interlaced, notes=notes)
+
+
+def pick_container(video_codec: str, audio_codecs: set[str], prefer: str) -> str:
+    """Output container that can hold the video codec and every copied audio
+    codec: the source's own (MP4/MOV/MKV) if possible, else MP4, MOV, MKV."""
+    order = ([prefer] if prefer in (".mp4", ".mov", ".mkv") else []) + [".mp4", ".mov", ".mkv"]
+    for ext in order:
+        rules = compat.CONTAINER_RULES.get(ext)
+        if rules is None:                       # Matroska: anything but Apple spatial audio
+            if not audio_codecs & {"apple_apac"}:
+                return ext
+            continue
+        vset, aset = rules
+        if video_codec in vset and audio_codecs <= aset:
+            return ext
+    return ".mkv"
 
 
 # --------------------------------------------------------------------------- #
@@ -437,6 +455,18 @@ class _Ctx:
         return self.vignettes[key]
 
 
+INTERLACED = ("tt", "bb", "tb", "bt")
+
+
+def _deinterlace(clip: Clip, target: Target) -> list[str]:
+    """Camcorder 1080i / DVD footage: remove the comb lines when the result is
+    progressive (bwdif keeps one frame per frame, so the timing is unchanged).
+    Re-encoded bits of footage that stays interlaced are left as they are."""
+    if clip.v and clip.v.field_order in INTERLACED and not target.interlaced:
+        return ["bwdif=mode=send_frame:parity=auto:deint=all"]
+    return []
+
+
 def _user_rotation(seg: Segment) -> list[str]:
     f = {90: ["transpose=clock"], 180: ["hflip", "vflip"], 270: ["transpose=cclock"]}.get(seg.edit.rotate % 360, [])
     return f + (["hflip"] if seg.edit.flip else [])
@@ -476,12 +506,18 @@ def _rgb_to_target(target: Target, alpha: bool = False) -> list[str]:
     """RGB(A) pictures (photos, captions) into the output's colours. In HLG
     output, SDR white sits at 75 % signal (ITU-R BT.2408), so photos and text
     aren't glaring on HDR screens."""
+    out = target.alpha_fmt if alpha else target.pix_fmt
+    if target.transfer == "smpte2084":
+        # HDR10 / PQ (Samsung, many Android phones): SDR white -> 203 nits (BT.2408)
+        return ["format=gbrapf32le" if alpha else "format=gbrpf32le",
+                "zscale=tin=iec61966-2-1:pin=bt709:min=gbr:rin=full:t=smpte2084:p=bt2020:m=bt2020nc:r=tv:npl=203",
+                f"format={out}"]
     f = []
     if target.hdr:
         f.append("colorchannelmixer=rr=0.75:gg=0.75:bb=0.75")
     m = "bt2020" if target.matrix.startswith("bt2020") else "bt709"
     f.append(f"scale=out_color_matrix={m}:out_range=tv")
-    f.append(f"format={target.alpha_fmt if alpha else target.pix_fmt}")
+    f.append(f"format={out}")
     return f
 
 
@@ -489,6 +525,9 @@ def _match_video_color(clip: Clip, target: Target) -> list[str]:
     hdr_src = clip.v.color_transfer in HDR_TRANSFERS
     if target.sdr and hdr_src:
         return _tonemap(clip)
+    if target.transfer == "smpte2084" and not hdr_src:
+        return ["zscale=tin=bt709:pin=bt709:min=bt709:rin=tv:t=smpte2084:p=bt2020:m=bt2020nc:r=tv:npl=203",
+                f"format={target.pix_fmt}"]
     if target.hdr and not hdr_src:
         return ["scale=in_color_matrix=bt709:in_range=tv,format=gbrp",
                 "colorchannelmixer=rr=0.75:gg=0.75:bb=0.75",
@@ -538,11 +577,12 @@ def seg_chain(g: _Graph, seg: Segment, ctx: _Ctx, a_src: float, b_src: float, o:
         f += ["setpts=PTS-STARTPTS", f"trim=duration={o.length:.6f}"] + _rgb_to_target(t)
     elif seg.kind == "freeze":
         k = g.input(["-ss", f"{_seek(seg.still_at, clip):.6f}", "-i", str(clip.path)])
-        f += ["trim=end_frame=1", "loop=loop=-1:size=1", f"setpts=N/(({rate})*TB)",
-              f"trim=duration={o.length:.6f}"]
+        f += _deinterlace(clip, t) + ["trim=end_frame=1", "loop=loop=-1:size=1", f"setpts=N/(({rate})*TB)",
+                                      f"trim=duration={o.length:.6f}"]
     else:
         k = g.input(["-ss", f"{_seek(a_src, clip):.6f}", "-t", f"{span + 0.5:.6f}", "-i", str(clip.path)])
         f += ["setpts=PTS-STARTPTS", f"trim=duration={span:.6f}"]
+        f += _deinterlace(clip, t)
         trf = ctx.trf.get(_trf_key(seg, a_src, b_src)) if stabilize else None
         if trf:
             f.append(f"vidstabtransform=input={trf}:smoothing=20:optzoom=1:interpol=bicubic")
@@ -691,6 +731,8 @@ def _finalize(g: _Graph, base: str, target: Target) -> str:
     if inv:
         post.append(inv)
     post.append(f"format={target.pix_fmt}")
+    if target.interlaced:
+        post.append("setfield=tff" if target.interlaced in ("tt", "tb") else "setfield=bff")
     # Tag every frame with exactly the reference's colour description (also
     # "unknown"). Filters such as caption overlays otherwise leave e.g. a
     # BT.709 tag behind; the encoder writes it into the stream header, and a
@@ -715,11 +757,15 @@ def _encoder_args(target: Target) -> list[str]:
             xp.append(f"colormatrix={mat}")
         if rng:
             xp.append("range=" + ("full" if rng in ("pc", "jpeg") else "limited"))
+        # no forced profile: x265/x264 pick it from the pixel format (4:2:0 / 4:2:2 / 4:4:4)
         args += ["-c:v", "libx265", "-preset", target.speed_preset, "-crf", str(target.crf),
-                 "-profile:v", "main10" if target.ten_bit else "main", "-x265-params", ":".join(xp)]
+                 "-x265-params", ":".join(xp)]
     else:
-        args += ["-c:v", "libx264", "-preset", target.speed_preset, "-crf", str(target.crf),
-                 "-profile:v", "high10" if target.ten_bit else "high"]
+        args += ["-c:v", "libx264", "-preset", target.speed_preset, "-crf", str(target.crf)]
+        if target.interlaced:
+            # re-encoded bits of interlaced camcorder footage stay interlaced, so
+            # they match the stream-copied rest (1080i AVCHD, DV-style files)
+            args += ["-flags", "+ildct+ilme"]        # field order comes from setfield in _finalize
     for opt, val in (("-color_primaries", prim), ("-color_trc", trc),
                      ("-colorspace", mat), ("-color_range", rng)):
         if val:
@@ -728,8 +774,10 @@ def _encoder_args(target: Target) -> list[str]:
 
 
 def _part_mux(dst: Path) -> list[str]:
-    fmt = "matroska" if dst.suffix == ".mkv" else "mov"
-    return ["-map_metadata", "-1", "-f", fmt, "-n", str(dst)]
+    if dst.suffix == ".mkv":
+        return ["-map_metadata", "-1", "-f", "matroska", "-n", str(dst)]
+    # one time base for every MOV part: FFmpeg's concat doesn't convert between them
+    return ["-video_track_timescale", COMMON_TIMESCALE, "-map_metadata", "-1", "-f", "mov", "-n", str(dst)]
 
 
 # --------------------------------------------------------------------------- #
@@ -826,8 +874,9 @@ def plan_parts(project: Project, target: Target, index_of) -> list[Part]:
         la0, lb0 = lead, L - trail
         if lb0 - la0 > 1e-3:
             if _needs_encode(seg, target):
-                fps = target.fps or (_fps_for(target, seg) if (seg.is_still or abs(seg.speed - 1) > 1e-6
-                                                               or seg.edit.reverse) else None)
+                # a constant rate gives exact, non-overlapping timing whatever the source's
+                # container claims (WMV, VOB, 3GP, variable-rate phone footage …)
+                fps = target.fps or _fps_for(target, seg)
                 step = _reverse_chunk(seg, target) if seg.edit.reverse else (lb0 - la0)
                 la = la0
                 while la < lb0 - 1e-6:
@@ -862,10 +911,19 @@ def plan_parts(project: Project, target: Target, index_of) -> list[Part]:
                         pieces.append(("copy", pos, lb0))
                     idx = None
                     for kind, la, lb in pieces:
-                        if kind == "enc":
-                            parts.append(enc(seg, i, la, lb, fade_in, fade_out))
-                            continue
                         idx = idx or index_of(seg.clip)
+                        if kind == "enc":
+                            # stretch under a caption / overlay: the exact source frames, so it
+                            # meets the stream-copied neighbours without gaps or overlaps
+                            pe = enc(seg, i, la, lb, fade_in, fade_out)
+                            pe.a = _snap(idx.frames, pe.a, idx.end)
+                            pe.b = _snap(idx.frames, pe.b, idx.end)
+                            pe.frames = _count(idx.frames, pe.a, pe.b)
+                            pe.duration = pe.b - pe.a
+                            pe.t0 = T + (pe.a - seg.src_in)
+                            pe.opts.t_offset, pe.opts.length = pe.a - seg.src_in, pe.duration
+                            parts.append(pe)
+                            continue
                         a, b = seg.src_in + la, seg.src_in + lb
                         cut = plan_cut(idx, a, b, seg.clip.v.codec,
                                        min_head=fade_in if la <= 1e-6 else 0.0,
@@ -980,6 +1038,27 @@ def _frame_hashes(path: Path, start: float | None = None, n: int = 3) -> list[st
             if ln and not ln.startswith("#")]
 
 
+def _copy_ok(p: "Part", dst: Path) -> bool:
+    """Did the stream copy take exactly the planned packets?
+
+    MP4/MOV sources: every packet size must match. Other containers (MPEG-TS
+    from camcorders, Matroska …) change packet sizes when rewrapped, so there
+    the packet count must match and the first frames must decode identically
+    to the source at that point."""
+    clip = p.seg.clip
+    if "mov" in clip.format_name or "mp4" in clip.format_name:
+        return _copied_sizes(dst) == p.expect
+    proc = ff.run([ff.ffprobe_path(), "-v", "error", "-select_streams", "V:0", "-count_packets",
+                   "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", str(dst)], timeout=300)
+    import re
+    m = re.search(r"\d+", ff.decode(proc.stdout))
+    if not m or int(m.group()) != p.packets - len(p.drop):
+        return False
+    fps = clip.v.nominal_fps or 30
+    want = _frame_hashes(clip.path, p.a - 0.25 / fps, 3)
+    return bool(want) and _frame_hashes(dst, None, 3) == want
+
+
 def _copied_sizes(path: Path) -> list[int] | None:
     """Sizes of the non-key video packets of *path* (to verify a copy)."""
     proc = ff.run([ff.ffprobe_path(), "-v", "error", "-select_streams", "V:0",
@@ -1028,8 +1107,15 @@ def audio_mix_args(project: Project, target: Target, dst: Path, speech_only: boo
         vol = 0.0 if e.muted else e.volume
         if track is not None and vol > 0:
             span = s.src_out - s.src_in
-            k = g.input(["-ss", f"{s.src_in:.6f}", "-t", f"{span + 0.5:.6f}", "-i", str(s.clip.path)])
-            f = [fmt, "asetpts=PTS-STARTPTS", f"atrim=duration={span:.6f}"]
+            if s.clip.format_name in ("mpeg", "vob", "mpegvideo"):
+                # DVD / MPEG-PS: seeking lands mid audio frame and FFmpeg aborts,
+                # so decode from the start and cut afterwards (cheap for sound)
+                k = g.input(["-i", str(s.clip.path)])
+                f = [fmt, "asetpts=PTS-STARTPTS", f"atrim=start={s.src_in:.6f}:duration={span:.6f}",
+                     "asetpts=PTS-STARTPTS"]
+            else:
+                k = g.input(["-ss", f"{s.src_in:.6f}", "-t", f"{span + 0.5:.6f}", "-i", str(s.clip.path)])
+                f = [fmt, "asetpts=PTS-STARTPTS", f"atrim=duration={span:.6f}"]
             if e.reverse:
                 f.append("areverse")
             f += _atempo(s.speed)
@@ -1129,14 +1215,6 @@ def audio_mix_args(project: Project, target: Target, dst: Path, speech_only: boo
                        "-ar", str(target.audio_rate), "-f", "mp4", "-n", str(dst)]
 
 
-def audio_cut_args(seg: Segment, dst: Path) -> list[str]:
-    """All audio tracks of a trimmed segment, stream-copied (spatial audio too)."""
-    return ["-ss", f"{seg.src_in:.6f}", "-i", str(seg.clip.path), "-t", f"{seg.src_out - seg.src_in:.6f}",
-            # copypriorss 0: don't keep the pre-roll packets before the seek point
-            "-map", "0:a", "-c", "copy", "-copypriorss", "0", "-map_metadata", "-1",
-            "-f", "mov", "-n", str(dst)]
-
-
 # --------------------------------------------------------------------------- #
 # Render
 # --------------------------------------------------------------------------- #
@@ -1187,11 +1265,18 @@ def render_project(project: Project, output: Path, on_progress: ProgressFn, canc
     parts = plan_parts(project, target, index_of)
     hevc = target.codec == "hevc"
     any_new = any(p.kind != "source" for p in parts)
-    if hevc and (any_new or needs_header_embedding([p.seg.clip for p in parts if p.kind == "source"])):
+    sources = [p.seg.clip for p in parts if p.kind == "source"]
+    # whole clips that are copied are rewrapped when they'd be joined with new
+    # parts or with clips of another time base (concat can't mix time bases)
+    tb_mismatch = len({stream_timebase(c.path, "V:0") for c in sources}) > 1
+    if any_new or tb_mismatch or (hevc and needs_header_embedding(sources)):
         for p in parts:
             if p.kind == "source":
                 p.kind = "embed"
-    trimmed_audio = [s for s in segs if s.trimmed] if target.audio_copy else []
+    # copied sound: every clip's audio is rewrapped into one container type
+    # (same time base everywhere), trimmed clips cut to their range
+    audio_ext = (".mov" if all(audio_container(s.clip) == ".mov" for s in segs if s.clip.audio) else ".mka")
+    audio_parts = [s for s in segs if s.clip.audio] if target.audio_copy else []
 
     # stabilizer analysis for every rendered range of a stabilized clip
     stab_jobs: list[tuple[Segment, float, float]] = []
@@ -1202,7 +1287,7 @@ def render_project(project: Project, output: Path, on_progress: ProgressFn, canc
 
     weights = [p.weight for p in parts if p.kind != "source"]
     weights += [(b - a) * ENCODE_WEIGHT * 0.4 for _, a, b in stab_jobs]
-    weights += [s.length * COPY_WEIGHT for s in trimmed_audio]
+    weights += [s.length * COPY_WEIGHT * 0.2 for s in audio_parts]
     has_audio = any(s.has_audio for s in segs) or bool(project.audios) or any(o.has_audio for o in project.overlays)
     if has_audio and not target.audio_copy:
         weights.append(total * 0.6)
@@ -1227,14 +1312,18 @@ def render_project(project: Project, output: Path, on_progress: ProgressFn, canc
             if p.kind == "source":
                 video_files.append(p.seg.clip.path)
             elif p.kind == "embed":
-                dst = parts_dir / f"p{i:05d}.mkv"
-                stages.run(_embed_args(p.seg.clip.path, dst), p.duration,
-                           f"Copying {p.seg.clip.name} (lossless)", cancel)
+                if hevc:
+                    dst = parts_dir / f"p{i:05d}.mkv"
+                    args = _embed_args(p.seg.clip.path, dst)
+                else:
+                    dst = parts_dir / f"p{i:05d}{target.part_ext}"
+                    args = rewrap_video_args(p.seg.clip.path, dst)
+                stages.run(args, p.duration, f"Copying {p.seg.clip.name} (lossless)", cancel)
                 video_files.append(dst)
             elif p.kind == "copy":
                 dst = parts_dir / f"p{i:05d}{target.part_ext}"
                 stages.run(copy_args(p, dst), p.duration, f"Copying {p.seg.clip.name} (lossless)", cancel)
-                if _copied_sizes(dst) != p.expect:
+                if not _copy_ok(p, dst):
                     # Unexpected stream layout: fall back to encoding this range.
                     _remove_quietly(dst)
                     fallback_notes.append(f"Part of {p.seg.clip.name} couldn't be cut losslessly "
@@ -1263,12 +1352,11 @@ def render_project(project: Project, output: Path, on_progress: ProgressFn, canc
         if has_audio and target.audio_copy:
             files, durs = [], []
             for j, s in enumerate(segs, 1):
-                if s.trimmed:
-                    dst = parts_dir / f"a{j:05d}.mov"
-                    stages.run(audio_cut_args(s, dst), s.length, "Copying audio (lossless)", cancel)
-                    files.append(dst)
-                else:
-                    files.append(s.clip.path)
+                dst = parts_dir / f"a{j:05d}{audio_ext}"
+                args = (rewrap_audio_args(s.clip.path, dst, s.src_in, s.src_out - s.src_in) if s.trimmed
+                        else rewrap_audio_args(s.clip.path, dst))
+                stages.run(args, s.length, "Copying audio (lossless)", cancel)
+                files.append(dst)
                 durs.append(s.length)
             alist = _concat_list(files, Path(td), "audio.txt", durs)
             audio_input = ["-f", "concat", "-safe", "0", "-i", str(alist)]
@@ -1322,6 +1410,9 @@ def render_project(project: Project, output: Path, on_progress: ProgressFn, canc
                 raise MergeError("The joined video failed verification (copied footage didn't decode "
                                  "identically). No file was written.")
 
+        if has_audio and not probe(tmp_out).audio:
+            raise MergeError("The sound could not be written into the video (the audio format didn't fit the "
+                             "container). No file was written — please report this file type.")
         copied = sum(p.duration for p in parts if p.kind in ("source", "embed", "copy"))
         notes = list(target.notes) + fallback_notes
         if 0 < copied < total - 0.05:

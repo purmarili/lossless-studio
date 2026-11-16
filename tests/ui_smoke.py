@@ -304,6 +304,28 @@ win.undo()
 assert len(win.project.segments) == 1
 win.dirty = False
 
+# --- 360° video: dropped on the timeline -> choose a view -> converted & inserted ------
+fmt_root = samples.parent / "formats"
+insv = fmt_root / "insta360" / "VID_20251003_130500_00_002.insv"
+if insv.exists():
+    from lossless_merger.ui import reframe_dialog
+    from lossless_merger import reframe as rf
+    reframe_dialog.ReframeDialog.result_view = lambda self: (rf.View360(yaw=45), False)
+    n0 = len(win.project.segments)
+    win._on_media_dropped([str(insv)], "paths", ("index", 0))
+    pump(lambda: len(win.project.segments) == n0 + 1, 120)
+    first = win.project.segments[0].clip
+    assert "_view" in first.name and first.name.endswith(".mp4") and not first.is_360, first.name
+    print("360 converted:", first.name, first.v.width, "x", first.v.height)
+    shot("22_360_converted")
+    win.dirty = False
+    win.preview.shutdown()
+    pump(lambda: True, 0.5)
+    try:
+        first.path.unlink(missing_ok=True)
+    except PermissionError:
+        pass
+
 for f in (out5, photo, music, proj):
     try:
         f.unlink(missing_ok=True)
@@ -313,3 +335,4 @@ win.dirty = False
 print("UI SMOKE TEST PASSED")
 QTimer.singleShot(0, app.quit)
 win.close()
+

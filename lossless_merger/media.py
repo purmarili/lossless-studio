@@ -15,7 +15,10 @@ from . import ffmpeg_tools as ff
 VIDEO_EXTENSIONS = {
     ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".mts", ".m2ts", ".ts",
     ".mpg", ".mpeg", ".3gp", ".3g2", ".wmv", ".flv", ".mxf", ".insv", ".lrv",
+    ".vob", ".mod", ".tod", ".dv", ".ogv", ".asf", ".divx", ".f4v", ".m2t", ".360",
 }
+GOPRO_360_MESSAGE = ("GoPro MAX 360° file. Export it with the free GoPro Player app first "
+                     "(choose a normal or 360° MP4), then add the exported file.")
 # Low-resolution proxy files written by some cameras next to the real footage.
 _SKIP_EXTENSIONS = {".lrv", ".thm"}
 
@@ -83,6 +86,14 @@ class Clip:
     creation_time_tag: str | None = None
     error: str | None = None
     render_path: Path | None = None   # photos: upright PNG/JPEG FFmpeg reads instead of path
+    # 360° footage: "" (normal) | "equirect" (stitched 360) | "dfisheye" (raw two-lens:
+    # both lenses side by side in one picture) | "dfisheye2" (one stream per lens)
+    projection: str = ""
+    lens_pair: Path | None = None     # Insta360 ONE X style: second lens in a separate file
+
+    @property
+    def is_360(self) -> bool:
+        return bool(self.projection)
 
     @property
     def id(self) -> str:
@@ -122,6 +133,11 @@ def scan_folder(folder: Path, recursive: bool = False) -> list[Path]:
         ext = p.suffix.lower()
         if ext in VIDEO_EXTENSIONS and ext not in _SKIP_EXTENSIONS and not p.name.startswith("."):
             files.append(p)
+    # Insta360 ONE X style: lens 2 lives in "..._10_..." next to "..._00_...":
+    # it is used together with lens 1, not listed as a clip of its own
+    names = {f.name for f in files}
+    files = [f for f in files if not (f.suffix.lower() == ".insv" and "_10_" in f.name
+                                      and f.name.replace("_10_", "_00_") in names)]
     return sorted(files, key=lambda p: str(p).lower())
 
 
@@ -232,6 +248,7 @@ def probe(path: Path, timeout: float = 60) -> Clip:
         clip.duration = max(durations)
     if not clip.video:
         clip.error = "No video stream found"
+    _detect_360(clip, info)
 
     clip.recorded, clip.date_source, clip.creation_time_tag = recording_time(path, info)
     return clip
@@ -262,6 +279,37 @@ def probe_audio(path: Path) -> tuple[float, str | None]:
     if c.audio:
         return c.duration, None
     return 0.0, c.error or "No audio found in this file"
+
+
+def _detect_360(clip: Clip, info: dict) -> None:
+    """Recognise 360° footage (stitched equirectangular, or raw two-lens)."""
+    ext = clip.path.suffix.lower()
+    if ext == ".360":
+        clip.error = GOPRO_360_MESSAGE
+        return
+    if clip.error or not clip.video:
+        return
+    for s in info.get("streams", []):
+        if s.get("codec_type") != "video":
+            continue
+        for sd in s.get("side_data_list", []) or []:
+            if "spherical" in str(sd.get("side_data_type", "")).lower():
+                if str(sd.get("projection", "")).lower().startswith("equirect"):
+                    clip.projection = "equirect"
+                return
+    if ext != ".insv":
+        return
+    v = clip.v
+    if len(clip.video) >= 2:
+        clip.projection = "dfisheye2"                 # X3 / X4: one stream per lens
+    elif v.width >= 1.8 * v.height:
+        clip.projection = "dfisheye"                  # both circles side by side
+    else:
+        pair = clip.path.with_name(clip.path.name.replace("_00_", "_10_"))
+        if "_00_" in clip.path.name and pair.exists():
+            clip.projection = "dfisheye2"             # ONE X: second lens in its own file
+            clip.lens_pair = pair
+        # else: a single lens only — used as a normal (fisheye-looking) video
 
 
 # --------------------------------------------------------------------------- #

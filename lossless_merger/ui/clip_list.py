@@ -208,6 +208,8 @@ class BinDelegate(QStyledItemDelegate):
         small.setPointSizeF(8.5)
         p.setFont(small)
         badge = "Photo" if clip.is_image else ("⚠" if clip.error else fmt_duration(clip.duration))
+        if clip.is_360:
+            badge = "360°  " + badge
         fm = QFontMetrics(small)
         bw = fm.horizontalAdvance(badge) + 10
         br = QRectF(trect.right() - bw - 4, trect.bottom() - 20, bw, 16)

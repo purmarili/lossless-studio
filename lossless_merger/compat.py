@@ -212,7 +212,8 @@ _MP4_VIDEO = {"h264", "hevc", "av1", "vp9", "mpeg4", "mpeg2video", "mjpeg"}
 _MP4_AUDIO = {"aac", "mp3", "ac3", "eac3", "opus", "flac", "alac", "mp2"}
 _MOV_VIDEO = _MP4_VIDEO | {"prores", "dnxhd", "rawvideo"}
 _MOV_AUDIO = _MP4_AUDIO | {"pcm_s16le", "pcm_s16be", "pcm_s24le", "pcm_s24be", "pcm_s32le", "pcm_f32le",
-                           "apple_apac"}   # iPhone spatial audio: MOV only
+                           "apple_apac",   # iPhone spatial audio: MOV only
+                           "amr_nb", "amr_wb", "pcm_mulaw", "pcm_alaw", "adpcm_ima_qt"}
 _WEBM_VIDEO = {"vp8", "vp9", "av1"}
 _WEBM_AUDIO = {"opus", "vorbis"}
 # Codecs that only work in specific containers (everything else is fine in MKV/TS).
@@ -256,7 +257,9 @@ def container_problem(clip: Clip, ext: str) -> str | None:
 
 def compatible_container(clip: Clip) -> str:
     """A container that can hold this clip's codecs as they are."""
-    return next((e for e in (".mkv", ".mov", ".mp4") if not container_problem(clip, e)), ".mkv")
+    # MP4-family sources (phones, Sony XAVC with PCM sound) stay in the QuickTime family
+    order = (".mov", ".mkv", ".mp4") if clip.path.suffix.lower() in (".mp4", ".m4v", ".mov") else (".mkv", ".mov", ".mp4")
+    return next((e for e in order if not container_problem(clip, e)), ".mkv")
 
 
 def suggested_extension(clips: list[Clip]) -> str:

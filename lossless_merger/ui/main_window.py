@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QFram
                                QListWidgetItem, QMainWindow, QMenu, QProgressBar, QPushButton, QScrollArea,
                                QSizePolicy, QSplitter, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
-from .. import APP_NAME, captions, compat, merger, projectio, render
+from .. import APP_NAME, captions, compat, merger, projectio, reframe, render
 from ..ffmpeg_tools import FFmpegNotFound, ffmpeg_path, ffprobe_path
 from ..media import (AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, Clip, codec_label, fmt_duration,
                      fmt_size, probe, probe_audio, scan_folder, sort_chronologically)
@@ -26,6 +26,7 @@ from .inspector import Inspector
 from .mediaimport import load_photo
 from .preview import Preview, fmt_time
 from .recorder import VoiceRecorder
+from .reframe_dialog import ReframeDialog
 from .textimg import text_render
 from .timeline import Timeline
 from .workers import (Bus, FilmstripTask, ImportSignals, ImportTask, MergeThread, ProbeTask, ThumbTask,
@@ -537,9 +538,14 @@ class MainWindow(QMainWindow):
         if self.pending == 0:
             ordered = sort_chronologically(list(self.clips.values()))
             self.library = [c.id for c in ordered]
-            self.project = Project([Segment(c) for c in ordered])
+            # raw 360° clips need a view chosen first: they wait in the media panel
+            self.project = Project([Segment(c) for c in ordered if not c.is_360])
             self._show_editor()
             self._reset_history()
+            n360 = sum(1 for c in ordered if c.is_360)
+            if n360:
+                self.preview.message.setText(f"{n360} 360° video{'s' if n360 != 1 else ''} in the media panel — "
+                                             "double-click to choose a view")
 
     def _show_editor(self):
         self._fill_bin()
@@ -705,6 +711,14 @@ class MainWindow(QMainWindow):
         clips = [c for c in clips if c is not None and not c.error]
         if not clips:
             return
+        raw = [c for c in clips if c.is_360]
+        if raw:
+            # 360° footage becomes a normal video first (the user picks the view)
+            def then(mapping, clips=clips, dest=dest):
+                self._place([mapping[c.id] if c.is_360 else c for c in clips
+                             if not c.is_360 or c.id in mapping], dest)
+            self._convert_360(raw, then)
+            return
         kind = dest[0]
         if kind == "overlay" and self.project.segments:
             t = dest[1]
@@ -735,6 +749,52 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(30, self.timeline.zoom_fit)
         self.preview.message.setText(f"Added {len(segs)} clip{'s' if len(segs) != 1 else ''} to the timeline")
 
+    def _convert_360(self, clips: list[Clip], then=None):
+        """Ask for a view per 360° clip, convert them in the background, then
+        call then({raw clip id: converted Clip})."""
+        import copy
+        jobs, shared = [], None
+        for c in clips:
+            if shared is not None:
+                view = copy.copy(shared)
+            else:
+                r = ReframeDialog(self, c, None, len(clips)).result_view()
+                if r is None:
+                    continue
+                view, use_for_all = r
+                if use_for_all:
+                    shared = view
+            jobs.append((c, view, reframe.output_path(c, view)))
+        if not jobs:
+            return
+
+        def job(cb, cancel, jobs=jobs):
+            out = {}
+            for k, (c, v, dst) in enumerate(jobs):
+                reframe.convert(c, v, dst, lambda f, s, st, k=k: cb((k + f) / len(jobs), s, st), cancel)
+                out[c.id] = dst
+            return out
+
+        def done(paths):
+            mapping = {}
+            for cid, dst in paths.items():
+                nc = probe(dst)
+                if nc.error:
+                    continue
+                self.clips[nc.id] = nc
+                if nc.id not in self.library:
+                    pos = self.library.index(cid) + 1 if cid in self.library else len(self.library)
+                    self.library.insert(pos, nc.id)
+                self._request_media_art(nc)
+                mapping[cid] = nc
+            self._fill_bin()
+            names = ", ".join(Path(p).name for p in paths.values())
+            self.preview.message.setText(f"Converted: {names}")
+            if then is not None and mapping:
+                then(mapping)
+
+        self._run_job(job, done, "Converting 360° video")
+
     def _on_media_dropped(self, items, kind: str, dest: tuple):
         if self._busy():
             return
@@ -762,6 +822,10 @@ class MainWindow(QMainWindow):
             item.setSelected(True)
             ids = [item.data(ID_ROLE)]
         m = QMenu(self)
+        raw = [self.clips[i] for i in ids if i in self.clips and self.clips[i].is_360]
+        if raw:
+            m.addAction("Choose a view (360°)…", lambda: self._convert_360(raw))
+            m.addSeparator()
         m.addAction("Add to the end of the timeline", lambda: self.add_selected_to_timeline("end"))
         m.addAction("Insert at the playhead", lambda: self.add_selected_to_timeline("playhead"))
         m.addAction("Add as picture-in-picture", self.add_selected_as_overlay)
