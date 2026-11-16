@@ -1,6 +1,25 @@
 # Lossless Video Merger
 
-A Windows desktop app that joins a folder of video recordings into one file **without re-encoding**: it uses FFmpeg stream copy (`-c copy`), so the result keeps the original resolution, frame rate, codecs, bit depth and audio quality. It can also trim, split and edit clips. Anything you don't touch is still copied bit-exact; only the frames you change are re-encoded.
+A Windows desktop app that joins a folder of video recordings into one file **without re-encoding**: it uses FFmpeg stream copy (`-c copy`), so the result keeps the original resolution, frame rate, codecs, bit depth and audio quality.
+
+It is also a CapCut-style editor with:
+
+- a timeline
+- trimming and splitting
+- text, picture-in-picture, transitions and effects
+- music, voice-over and offline auto captions
+
+Anything you don't touch is still copied bit-exact; only the frames you change are re-encoded.
+
+## Download
+
+**[⬇ Download for Windows (64-bit)](https://github.com/purmarili/video_merger/releases/latest/download/LosslessVideoMerger-win64.zip)**. You can also see all versions on the [Releases page](https://github.com/purmarili/video_merger/releases).
+
+1. Unzip the file anywhere, for example to `Documents\LosslessVideoMerger`.
+2. Run `LosslessVideoMerger.exe`. Nothing needs to be installed, and FFmpeg is included.
+3. The app isn't code-signed, so Windows SmartScreen may say *"Windows protected your PC"*. Click **More info › Run anyway**.
+
+It needs Windows 10 or 11, 64-bit. Keep the whole folder together: the exe needs the `_internal`, `ffmpeg` and `whisper` folders next to it.
 
 ## Using it
 
@@ -260,6 +279,8 @@ tools/make_icon.py            renders assets/icon.ico
 build.ps1                     Windows build script
 ```
 
-## License note
+## License
 
-The bundled FFmpeg build is GPL-licensed (see `ffmpeg\LICENSE.txt`). It runs as a separate program and is not linked into the app.
+The app's source code is released under the [MIT License](LICENSE).
+
+The Windows download also bundles FFmpeg (GPL-3.0), whisper.cpp (MIT) and Qt/PySide6 (LGPL-3.0); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). FFmpeg and whisper.cpp run as separate programs and are not linked into the app.

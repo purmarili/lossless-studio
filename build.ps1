@@ -75,6 +75,7 @@ if (-not (Test-Path "whisper\whisper-cli.exe")) {
         New-Item -ItemType Directory -Force whisper | Out-Null
         Get-ChildItem $cli.DirectoryName | Where-Object { $_.Name -eq "whisper-cli.exe" -or $_.Name -eq "whisper.dll" -or $_.Name -like "ggml*.dll" } |
             Copy-Item -Destination whisper
+        Invoke-WebRequest "https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/LICENSE" -OutFile whisper\LICENSE.txt
     } finally {
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }
@@ -128,7 +129,7 @@ if ($OneFile) {
     Remove-Item -Recurse "$qt\plugins\platforminputcontexts" -ErrorAction SilentlyContinue
     Copy-Item -Recurse ffmpeg "dist\$AppName\ffmpeg"
     if (Test-Path whisper) { Copy-Item -Recurse whisper "dist\$AppName\whisper" }
-    Copy-Item README.md "dist\$AppName\" -Force
+    Copy-Item README.md, LICENSE, THIRD_PARTY_NOTICES.md "dist\$AppName\" -Force
     Step "Creating zip"
     $zip = "dist\$AppName-win64.zip"
     Remove-Item $zip -ErrorAction SilentlyContinue
