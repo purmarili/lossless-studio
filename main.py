@@ -1,4 +1,4 @@
-"""Lossless Video Merger - entry point."""
+"""Lossless Studio - entry point."""
 
 import sys
 from pathlib import Path
@@ -16,7 +16,7 @@ def main() -> int:
     if sys.platform == "win32":
         try:  # own taskbar icon/group instead of python.exe's
             import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("LosslessVideoMerger.App")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("LosslessStudio.App")
         except Exception:
             pass
 

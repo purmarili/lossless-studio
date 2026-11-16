@@ -231,7 +231,7 @@ pv.pause()
 print("played to", round(pv.position(), 2))
 
 # save + reopen the project
-proj = shots / "smoke.lvmproj"
+proj = shots / "smoke.lsproj"
 proj.unlink(missing_ok=True)
 QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (str(proj), ""))
 win.project_path = None

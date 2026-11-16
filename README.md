@@ -1,4 +1,4 @@
-# Lossless Video Merger
+# Lossless Studio
 
 A Windows desktop app that joins a folder of video recordings into one file **without re-encoding**: it uses FFmpeg stream copy (`-c copy`), so the result keeps the original resolution, frame rate, codecs, bit depth and audio quality.
 
@@ -13,17 +13,17 @@ Anything you don't touch is still copied bit-exact; only the frames you change a
 
 ## Download
 
-**[⬇ Download for Windows (64-bit)](https://github.com/purmarili/video_merger/releases/latest/download/LosslessVideoMerger-win64.zip)**. You can also see all versions on the [Releases page](https://github.com/purmarili/video_merger/releases).
+**[⬇ Download for Windows (64-bit)](https://github.com/purmarili/lossless-studio/releases/latest/download/LosslessStudio-win64.zip)**. You can also see all versions on the [Releases page](https://github.com/purmarili/lossless-studio/releases).
 
-1. Unzip the file anywhere, for example to `Documents\LosslessVideoMerger`.
-2. Run `LosslessVideoMerger.exe`. Nothing needs to be installed, and FFmpeg is included.
+1. Unzip the file anywhere, for example to `Documents\LosslessStudio`.
+2. Run `LosslessStudio.exe`. Nothing needs to be installed, and FFmpeg is included.
 3. The app isn't code-signed, so Windows SmartScreen may say *"Windows protected your PC"*. Click **More info › Run anyway**.
 
 It needs Windows 10 or 11, 64-bit. Keep the whole folder together: the exe needs the `_internal`, `ffmpeg` and `whisper` folders next to it.
 
 ## Using it
 
-1. Run `LosslessVideoMerger.exe` (or `python main.py`).
+1. Run `LosslessStudio.exe` (or `python main.py`).
 2. Click **Choose folder…**, or drop a folder onto the window. Tick **Include subfolders** for camera layouts such as `DCIM\100GOPRO`.
 3. The app finds all videos, sorts them by when they were recorded, and puts them on the timeline.
 4. Optionally edit (see below).
@@ -107,7 +107,7 @@ The window has four parts:
 | Ctrl+Z / Ctrl+Y | Undo / redo (covers every edit) |
 | Ctrl+S | Save the project |
 
-**Save project** writes a small `.lvmproj` file, so you can continue an edit later. It only references your media, and your files are never modified.
+**Save project** writes a small `.lsproj` file (older `.lvmproj` files open too), so you can continue an edit later. It only references your media, and your files are never modified.
 
 ### What you can edit
 
@@ -244,8 +244,8 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1 -OneFile   # single .exe (s
 
 The script creates `.venv`, installs dependencies, downloads FFmpeg 9.0 (BtbN GPL shared build) if it is missing, runs the tests and builds with PyInstaller. Output:
 
-- `dist\LosslessVideoMerger\LosslessVideoMerger.exe`: copy the whole folder anywhere. No installation is needed.
-- `dist\LosslessVideoMerger-win64.zip`: the same folder, zipped for sharing.
+- `dist\LosslessStudio\LosslessStudio.exe`: copy the whole folder anywhere. No installation is needed.
+- `dist\LosslessStudio-win64.zip`: the same folder, zipped for sharing.
 
 ## Tests
 
@@ -288,7 +288,7 @@ lossless_merger/
   project.py                  edit model: main track, text / overlay / audio tracks, export presets
   render.py                   edited export: smart cut, layers, effects, transitions, audio mix, verify
   captions.py                 offline auto captions (whisper.cpp + VAD)
-  projectio.py                save / open .lvmproj projects
+  projectio.py                save / open .lsproj projects
   ui/                         PySide6 interface (timeline, preview player, edit panel, media bin,
                               caption drawing, voice recorder, dialogs, workers, main window)
 whisper/                      whisper-cli.exe + DLLs (downloaded by build.ps1)

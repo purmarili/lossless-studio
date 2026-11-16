@@ -1,4 +1,4 @@
-"""Saving and opening edit projects (.lvmproj, JSON).
+"""Saving and opening edit projects (.lsproj, JSON; older .lvmproj files open too).
 
 Media files are referenced by their full path; nothing is copied. When a file
 is missing on load, the project still opens and the missing files are listed.
@@ -15,7 +15,10 @@ from .media import Clip, probe
 from .project import AudioItem, ClipEdit, OverlayItem, Project, Segment, TextItem, Transform
 
 VERSION = 1
-EXTENSION = ".lvmproj"
+EXTENSION = ".lsproj"
+OLD_EXTENSIONS = (".lvmproj",)              # saved by "Lossless Video Merger" (the old name)
+ALL_EXTENSIONS = (EXTENSION, *OLD_EXTENSIONS)
+APP_IDS = ("LosslessStudio", "LosslessVideoMerger")
 
 
 def _edit_to_dict(e: ClipEdit) -> dict:
@@ -39,7 +42,7 @@ def _media(clip: Clip) -> dict:
 
 def save(project: Project, path: Path, folder: Path | None = None) -> None:
     data = {
-        "app": "LosslessVideoMerger", "version": VERSION,
+        "app": APP_IDS[0], "version": VERSION,
         "folder": str(folder) if folder else None,
         "settings": {"canvas": project.canvas, "background": project.background, "preset": project.preset,
                      "fade_in": project.fade_in, "fade_out": project.fade_out},
@@ -59,8 +62,8 @@ def load(path: Path, load_photo: Callable[[Path], Clip],
          on_progress: Callable[[int, int], None] | None = None) -> tuple[Project, Path | None, list[str]]:
     """(project, folder, missing files). *load_photo* turns a photo path into a Clip."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    if data.get("app") != "LosslessVideoMerger":
-        raise ValueError("This is not a Lossless Video Merger project.")
+    if data.get("app") not in APP_IDS:
+        raise ValueError("This is not a Lossless Studio project.")
     cache: dict[str, Clip] = {}
     missing: list[str] = []
     media = [s["media"] for s in data.get("segments", [])] + [o["media"] for o in data.get("overlays", [])]

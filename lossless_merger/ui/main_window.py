@@ -36,7 +36,7 @@ MEDIA_FILTER = ("Media (" + " ".join(f"*{e}" for e in sorted(VIDEO_EXTENSIONS | 
                 + ");;Videos (" + " ".join(f"*{e}" for e in sorted(VIDEO_EXTENSIONS)) + ");;Photos ("
                 + " ".join(f"*{e}" for e in sorted(IMAGE_EXTENSIONS)) + ");;All files (*.*)")
 AUDIO_FILTER = "Audio (" + " ".join(f"*{e}" for e in sorted(AUDIO_EXTENSIONS)) + " *.mp4 *.mov);;All files (*.*)"
-PROJECT_FILTER = f"Lossless Video Merger project (*{projectio.EXTENSION})"
+PROJECT_FILTER = "Lossless Studio project (" + " ".join(f"*{e}" for e in projectio.ALL_EXTENSIONS) + ")"
 
 
 def _norm(p: Path) -> str:
@@ -52,7 +52,11 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1060, 700)
         self.setAcceptDrops(True)
 
-        self.settings = QSettings("LosslessVideoMerger", "LosslessVideoMerger")
+        self.settings = QSettings("LosslessStudio", "LosslessStudio")
+        if not self.settings.allKeys():         # first start after the rename: keep old settings
+            old = QSettings("LosslessVideoMerger", "LosslessVideoMerger")
+            for k in old.allKeys():
+                self.settings.setValue(k, old.value(k))
         self.bus = Bus()
         self.bus.probed.connect(self._on_probed)
         self.bus.thumbnail.connect(self._on_thumbnail)
@@ -1780,7 +1784,7 @@ class MainWindow(QMainWindow):
         paths = [Path(u.toLocalFile()) for u in e.mimeData().urls() if u.isLocalFile()]
         if not paths:
             return
-        if paths[0].suffix.lower() == projectio.EXTENSION:
+        if paths[0].suffix.lower() in projectio.ALL_EXTENSIONS:
             if self._confirm_discard():
                 self.load_project(paths[0])
             return

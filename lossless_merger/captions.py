@@ -71,7 +71,7 @@ def download_model(size: str, progress: Callable[[float], None], cancel: threadi
 
 def _download(url: str, dst: Path, progress: Callable[[float], None], cancel: threading.Event) -> Path:
     tmp = dst.with_suffix(".part")
-    req = urllib.request.Request(url, headers={"User-Agent": "LosslessVideoMerger"})
+    req = urllib.request.Request(url, headers={"User-Agent": "LosslessStudio"})
     try:
         with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
             total = int(r.headers.get("Content-Length") or 0)

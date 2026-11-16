@@ -1,15 +1,15 @@
 <#
 .SYNOPSIS
-    Builds the Lossless Video Merger Windows executable.
+    Builds the Lossless Studio Windows executable.
 
 .DESCRIPTION
     1. Creates/uses a virtual environment (.venv) and installs dependencies.
     2. Downloads FFmpeg (BtbN GPL shared build) into .\ffmpeg if it is missing.
     3. Runs the engine tests (skip with -SkipTests).
-    4. Builds with PyInstaller into dist\LosslessVideoMerger\ and zips it.
+    4. Builds with PyInstaller into dist\LosslessStudio\ and zips it.
 
 .PARAMETER OneFile
-    Build a single LosslessVideoMerger.exe instead of a folder. Starts slower,
+    Build a single LosslessStudio.exe instead of a folder. Starts slower,
     because FFmpeg is unpacked to a temp folder on every launch.
 
 .EXAMPLE
@@ -28,7 +28,7 @@ param(
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 Set-Location $PSScriptRoot
-$AppName = "LosslessVideoMerger"
+$AppName = "LosslessStudio"
 
 function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 
